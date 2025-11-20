@@ -123,4 +123,4 @@ jobs:
           tags: |
             ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.IMAGE_NAME_LOWER }}:latest
             ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.IMAGE_NAME_LOWER }}:${{ steps.vars.outputs.sha_short }}
-netapp:latest
+
