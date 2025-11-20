@@ -1,107 +1,126 @@
-name: CI/CD for HelloDotnetApp
+name: CI/CD with SonarCloud & Docker
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
 
 jobs:
-  build-test-sonar-docker:
+  build-test-analyze-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write          # Needed for SonarCloud PR decoration
 
     steps:
-    # -------------------------------
-    # CHECKOUT PROJECT
-    # -------------------------------
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0     # REQUIRED by SonarCloud
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0               # Required for SonarCloud
 
-    # -------------------------------
-    # SETUP .NET
-    # -------------------------------
-    - name: Setup .NET SDK
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '8.0.x'
+      # ──────────────────────────────────────
+      # 1. Setup .NET
+      # ──────────────────────────────────────
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'     # Change if you use 6.0 / 7.0
 
-    # -------------------------------
-    # RESTORE PACKAGES
-    # -------------------------------
-    - name: Restore dependencies
-      run: dotnet restore HelloDotnetApp/HelloDotnetApp.csproj
+      # ──────────────────────────────────────
+      # 2. SonarCloud Begin
+      # ──────────────────────────────────────
+      - name: SonarCloud Scan - Begin
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.projectKey=Radhika-TestEngineer_HelloDotnetApp
+            -Dsonar.organization=radhika-testengineer
+            -Dsonar.sources=App
+            -Dsonar.cs.opencover.reportsPaths=coverage.xml
+            -Dsonar.coverage.exclusions=**/*Tests/*.cs
 
-    # -------------------------------
-    # BUILD
-    # -------------------------------
-    - name: Build
-      run: dotnet build HelloDotnetApp/HelloDotnetApp.csproj --no-restore --configuration Release
+      # ──────────────────────────────────────
+      # 3. Restore dependencies
+      # ──────────────────────────────────────
+      - name: Restore dependencies
+        run: dotnet restore ./App/HelloDotnetApp.csproj
 
-    # -------------------------------
-    # TEST WITH COVERLET
-    # -------------------------------
-    - name: Run tests with coverage
-      run: |
-        dotnet test HelloDotnetApp.Tests/HelloDotnetApp.Tests.csproj \
-          --collect:"XPlat Code Coverage" \
-          --results-directory TestResults
+      # ──────────────────────────────────────
+      # 4. Build
+      # ──────────────────────────────────────
+      - name: Build
+        run: dotnet build ./App/HelloDotnetApp.csproj --no-restore --configuration Release
 
-    # -------------------------------
-    # INSTALL REPORTGENERATOR
-    # -------------------------------
-    - name: Install ReportGenerator
-      run: dotnet tool install --global dotnet-reportgenerator-globaltool
+      # ──────────────────────────────────────
+      # 5. Run tests + Generate coverage with Coverlet
+      # ──────────────────────────────────────
+      - name: Run tests & collect coverage
+        run: |
+          dotnet test ./App/HelloDotnetApp.csproj \
+            --no-build \
+            --configuration Release \
+            --collect:"XPlat Code Coverage" \
+            --settings coverlet.runsettings
 
-    # -------------------------------
-    # GENERATE COVERAGE REPORT
-    # -------------------------------
-    - name: Generate coverage report
-      run: |
-        reportgenerator \
-          -reports:"TestResults/**/coverage.cobertura.xml" \
-          -targetdir:"coverage-report" \
-          -reporttypes:"Cobertura"
+      # Convert coverage to OpenCover format for SonarCloud
+      - name: Convert coverage to OpenCover
+        run: |
+          dotnet tool install --global dotnet-reportgenerator-globaltool
+          reportgenerator \
+            -reports:**/coverage.cobertura.xml \
+            -targetdir:coveragereport \
+            -reporttypes:OpenCover
+          cp coveragereport/coverage.opencover.xml coverage.xml
 
-    # -------------------------------
-    # SONARCLOUD SCAN
-    # -------------------------------
-    - name: SonarCloud Scan
-      uses: SonarSource/sonarcloud-github-action@v2
-      with:
-        projectBaseDir: .
-      env:
-        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        SONAR_SCANNER_OPTS: >
-          -Dsonar.organization=radhika-testengineer
-          -Dsonar.projectKey=Radhika-TestEngineer_HelloDotnetApp
-          -Dsonar.cs.opencover.reportsPaths=coverage-report/Cobertura.xml
-          -Dsonar.coverage.exclusions=**/Migrations/**
+      # ──────────────────────────────────────
+      # 6. SonarCloud End (upload results)
+      # ──────────────────────────────────────
+      - name: SonarCloud Scan - End
+        if: success()
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-    # -------------------------------
-    # LOGIN TO GHCR
-    # -------------------------------
-    - name: Log in to GHCR
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      # ──────────────────────────────────────
+      # 7. Docker Build & Push (only on main/master push)
+      # ──────────────────────────────────────
+      - name: Set up Docker Buildx
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: docker/setup-buildx-action@v3
 
-    # -------------------------------
-    # BUILD DOCKER IMAGE
-    # -------------------------------
-    - name: Build Docker image
-      run: |
-        docker build \
-          -t ghcr.io/${{ github.repository_owner }}/hellodotnetapp:latest \
-          -f HelloDotnetApp/Dockerfile HelloDotnetApp/
+      - name: Login to GHCR
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-    # -------------------------------
-    # PUSH DOCKER IMAGE TO GHCR
-    # -------------------------------
-    - name: Push Docker image
-      run: |
-        docker push ghcr.io/${{ github.repository_owner }}/hellodotnetapp:latest
+      - name: Lowercase owner & image name
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          echo "REPO_OWNER_LOWER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+          echo "IMAGE_NAME_LOWER=hellodotnetapp" >> $GITHUB_ENV
+
+      - name: Get short SHA
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        id: vars
+        run: echo "sha_short=$(echo ${{ github.sha }} | cut -c 1-7)" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: docker/build-push-action@v6
+        with:
+          context: ./App
+          file: ./App/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.IMAGE_NAME_LOWER }}:latest
+            ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.IMAGE_NAME_LOWER }}:${{ steps.vars.outputs.sha_short }}
+netapp:latest
